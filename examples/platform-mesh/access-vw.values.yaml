@@ -10,10 +10,10 @@
 # workspace first. hack/setup-platform-mesh.sh runs the whole flow.
 
 # For a locally built image instead of the published one:
-#   docker build -t access-vw:local . && kind load docker-image access-vw:local --name platform-mesh
+#   make image-access && kind load docker-image ghcr.io/kcp-dev/contrib-virtual-workspaces/access-vw:latest --name platform-mesh
 # image:
-#   repository: docker.io/library/access-vw
-#   tag: local
+#   repository: ghcr.io/kcp-dev/contrib-virtual-workspaces/access-vw
+#   tag: latest
 
 kcp:
   frontProxy: frontproxy

@@ -9,10 +9,10 @@
 # hack/setup-platform-mesh.sh runs the whole flow.
 
 # For a locally built image instead of the published one:
-#   docker build -t mcp-vw:local . && kind load docker-image mcp-vw:local --name platform-mesh
+#   make image-mcp && kind load docker-image ghcr.io/kcp-dev/contrib-virtual-workspaces/mcp-vw:latest --name platform-mesh
 # image:
-#   repository: docker.io/library/mcp-vw
-#   tag: local
+#   repository: ghcr.io/kcp-dev/contrib-virtual-workspaces/mcp-vw
+#   tag: latest
 
 kcp:
   frontProxy: frontproxy

@@ -16,12 +16,12 @@ concurrency:
   group: ${{ github.ref }}
   cancel-in-progress: true
 
-# The virtual workspace images are built and published by their upstream
-# kcp-dev repositories; this pipeline only packages them as one OCM component,
-# versioned from this repository.
+# The virtual workspace images are built and published by the upstream
+# kcp-dev/contrib-virtual-workspaces repository; this pipeline only packages
+# them as one OCM component, versioned from this repository.
 env:
-  ACCESS_VW_IMAGE: ghcr.io/kcp-dev/contrib-access-virtual-workspace:0.0.3
-  MCP_VW_IMAGE: ghcr.io/kcp-dev/contrib-mcp-virtual-workspace:0.0.2
+  ACCESS_VW_IMAGE: ghcr.io/kcp-dev/contrib-virtual-workspaces/access-vw:0.1.0
+  MCP_VW_IMAGE: ghcr.io/kcp-dev/contrib-virtual-workspaces/mcp-vw:0.1.0
 
 jobs:
   # Reusable workflow inputs cannot read env, so expose the image pins as
