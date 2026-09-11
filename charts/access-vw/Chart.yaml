@@ -5,7 +5,7 @@ description: >-
   (permission-aware workspace discovery) behind kcp's front-proxy.
 type: application
 version: 0.3.0
-appVersion: "0.1.0"
+appVersion: "0.1.1"
 home: https://github.com/kcp-dev/contrib-virtual-workspaces
 sources:
   - https://github.com/kcp-dev/contrib-virtual-workspaces

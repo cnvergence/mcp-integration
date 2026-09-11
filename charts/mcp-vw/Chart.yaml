@@ -6,7 +6,7 @@ description: >-
   front-proxy. Scopes each session via the Access VW (SCAR).
 type: application
 version: 0.3.0
-appVersion: "0.1.0"
+appVersion: "0.1.1"
 home: https://github.com/kcp-dev/contrib-virtual-workspaces
 sources:
   - https://github.com/kcp-dev/contrib-virtual-workspaces
