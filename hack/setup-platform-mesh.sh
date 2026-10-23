@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Sets up the MCP stack on a running platform-mesh local-setup cluster and
-# wires OIDC so MCP clients authenticate with bearer tokens:
+# Sets up the MCP stack on a running platform-mesh local-setup cluster:
 #
-#   - installs the access-vw and mcp-vw charts
-#   - patches the FrontProxy with /services/access + /services/mcp mappings
-#     and Keycloak OIDC authentication
+#   - installs the access-vw and mcp-vw charts; mcp-vw validates MCP bearer
+#     tokens itself against the local-setup Keycloak
+#   - patches the FrontProxy with the /services/access mapping (the
+#     front-proxy carries no OIDC configuration and never sees MCP tokens)
 #   - binds the APIExport and impersonator RBAC in the demo workspaces
-#   - seeds a Keycloak demo user and a public client with direct grants
+#     (kustomize, examples/platform-mesh/kcp)
+#   - configures the Keycloak welcome realm declaratively via a
+#     keycloak-config-cli Job (examples/platform-mesh/keycloak); the demo
+#     user and client live in that ConfigMap, not in this script
 #   - extracts the kcp serving CA for client-side TLS trust
 #
 # Prerequisites:
@@ -19,26 +22,34 @@
 #   KCP_ADMIN_KUBECONFIG=/path/to/admin.kubeconfig hack/setup-platform-mesh.sh
 #
 # The kcp-access-vw / kcp-mcp-vw charts install from the published
-# platform-mesh OCI registry; override CHART_VERSION to pin another release.
+# platform-mesh OCI registry; override the *_CHART_VERSION vars to pin
+# other releases.
 set -euo pipefail
 
 CONTEXT=${KUBE_CONTEXT:-kind-platform-mesh}
 NS=${NAMESPACE:-platform-mesh-system}
 KCP_ADMIN_KUBECONFIG=${KCP_ADMIN_KUBECONFIG:?set KCP_ADMIN_KUBECONFIG to the kcp admin kubeconfig}
 DEMO_WORKSPACES=${DEMO_WORKSPACES:-"root:platform-mesh-system root:orgs"}
+# The demo identity, client and RBAC subject are declared in
+# examples/platform-mesh/{keycloak,kcp}; these vars only drive the final
+# token verification and must match those manifests.
 DEMO_USER=${DEMO_USER:-alice@example.com}
 DEMO_PASSWORD=${DEMO_PASSWORD:-alice-password}
 KEYCLOAK_URL=${KEYCLOAK_URL:-https://portal.localhost:8443/keycloak}
 REALM=${REALM:-welcome}
 CLIENT_ID=${CLIENT_ID:-kcp-mcp}
-EXTERNAL_URL=${EXTERNAL_URL:-https://kcp.api.portal.localhost:8443}
-CHART_VERSION=${CHART_VERSION:-0.1.0}
+MCP_URL=${MCP_URL:-https://mcp.portal.localhost:8443/services/mcp}
+ACCESS_CHART_VERSION=${ACCESS_CHART_VERSION:-0.1.0}
+# 0.2.0 is the first kcp-mcp-vw release with the requestheader values the
+# demo depends on; older charts silently drop them and mcp-vw keeps
+# trusting the kcp requestheader CA instead of the dedicated one.
+MCP_CHART_VERSION=${MCP_CHART_VERSION:-0.2.0}
 OCI_REPO=${OCI_REPO:-oci://ghcr.io/platform-mesh/helm-charts}
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-ACCESS_CHART=("${OCI_REPO}/kcp-access-vw" --version "${CHART_VERSION}")
-MCP_CHART=("${OCI_REPO}/kcp-mcp-vw" --version "${CHART_VERSION}")
+ACCESS_CHART=("${OCI_REPO}/kcp-access-vw" --version "${ACCESS_CHART_VERSION}")
+MCP_CHART=("${OCI_REPO}/kcp-mcp-vw" --version "${MCP_CHART_VERSION}")
 
 KC="kubectl --context ${CONTEXT} -n ${NS}"
 
@@ -63,6 +74,9 @@ step "Installing charts"
 ${KC} create secret generic mcp-oidc-issuer-ca \
   --from-file=ca.crt="$(mkcert -CAROOT)/rootCA.pem" \
   --dry-run=client -o yaml | ${KC} apply -f -
+# Dedicated requestheader CA for mcp-vw; the chart mounts its secret.
+${KC} apply -f "${ROOT}/examples/platform-mesh/mcp-vw-requestheader-ca.yaml"
+${KC} wait certificate mcp-vw-requestheader-ca --for=condition=Ready --timeout=120s
 helm upgrade --install access-vw "${ACCESS_CHART[@]}" \
   --kube-context "${CONTEXT}" -n "${NS}" \
   -f "${ROOT}/examples/platform-mesh/access-vw.values.yaml" \
@@ -81,11 +95,6 @@ else
   echo "already present"
 fi
 
-step "Enabling OIDC on the FrontProxy"
-${KC} patch frontproxy frontproxy --type=merge \
-  --patch-file "${ROOT}/examples/platform-mesh/frontproxy-oidc.yaml"
-${KC} rollout status deployment/frontproxy-front-proxy --timeout=180s
-
 step "Waiting for the access APIExport (created by the access-vw init container)"
 KCP_SERVER=$(kubectl --kubeconfig "${KCP_ADMIN_KUBECONFIG}" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 KCP_SERVER=${KCP_SERVER%%/clusters/*}
@@ -102,11 +111,7 @@ kcp_ws root:access:controllers get apiexport access.contrib.kcp.io > /dev/null
 step "Seeding demo workspaces: ${DEMO_WORKSPACES}"
 for ws in ${DEMO_WORKSPACES}; do
   echo "-- ${ws}"
-  kcp_ws "${ws}" apply -f "${ROOT}/examples/platform-mesh/kcp/apibinding-consumer.yaml"
-  kcp_ws "${ws}" apply -f "${ROOT}/examples/platform-mesh/kcp/mcp-impersonator-rbac.yaml"
-  kcp_ws "${ws}" create clusterrolebinding mcp-demo-user-admin \
-    --clusterrole=cluster-admin --user="oidc:${DEMO_USER}" \
-    --dry-run=client -o yaml | kcp_ws "${ws}" apply -f -
+  kcp_ws "${ws}" apply -k "${ROOT}/examples/platform-mesh/kcp"
 done
 
 step "Waiting for the virtual workspace pods"
@@ -119,60 +124,11 @@ ${KC} get secret root-server-ca -o jsonpath='{.data.tls\.crt}' | base64 -d \
       --dry-run=client -o yaml | ${KC} apply -f -
 kubectl --context "${CONTEXT}" apply -f "${ROOT}/examples/platform-mesh/mcp-route.yaml"
 
-step "Seeding Keycloak realm '${REALM}' (user ${DEMO_USER}, client ${CLIENT_ID})"
-KC_ADMIN_USER=$(${KC} get secret keycloak-admin -o jsonpath='{.data.username}' | base64 -d)
-KC_ADMIN_PW=$(${KC} get secret keycloak-admin -o jsonpath='{.data.secret}' | base64 -d)
-ADMIN_TOKEN=$(curl -sk -d "client_id=admin-cli" -d "username=${KC_ADMIN_USER}" \
-  -d "password=${KC_ADMIN_PW}" -d "grant_type=password" \
-  "${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token" | jq -r .access_token)
-kc_api() { # kc_api <method> <path> [json-body]
-  local method=$1 path=$2 body=${3:-}
-  curl -sk -X "${method}" -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-    ${body:+-H "Content-Type: application/json" -d "${body}"} \
-    "${KEYCLOAK_URL}/admin/realms/${REALM}${path}"
-}
-
-USER_ID=$(kc_api GET "/users?username=${DEMO_USER}&exact=true" | jq -r '.[0].id // empty')
-if [ -z "${USER_ID}" ]; then
-  kc_api POST /users "{\"username\":\"${DEMO_USER}\",\"email\":\"${DEMO_USER}\",\"firstName\":\"Demo\",\"lastName\":\"User\",\"enabled\":true,\"emailVerified\":true}" > /dev/null
-  USER_ID=$(kc_api GET "/users?username=${DEMO_USER}&exact=true" | jq -r '.[0].id')
-fi
-kc_api PUT "/users/${USER_ID}" "{\"firstName\":\"Demo\",\"lastName\":\"User\",\"email\":\"${DEMO_USER}\",\"emailVerified\":true,\"requiredActions\":[]}" > /dev/null
-kc_api PUT "/users/${USER_ID}/reset-password" "{\"type\":\"password\",\"value\":\"${DEMO_PASSWORD}\",\"temporary\":false}" > /dev/null
-
-INTERNAL_CLIENT_ID=$(kc_api GET "/clients?clientId=${CLIENT_ID}" | jq -r '.[0].id // empty')
-if [ -z "${INTERNAL_CLIENT_ID}" ]; then
-  kc_api POST /clients "{\"clientId\":\"${CLIENT_ID}\",\"publicClient\":true,\"directAccessGrantsEnabled\":true,\"standardFlowEnabled\":true,\"redirectUris\":[\"*\"],\"protocol\":\"openid-connect\"}" > /dev/null
-  INTERNAL_CLIENT_ID=$(kc_api GET "/clients?clientId=${CLIENT_ID}" | jq -r '.[0].id')
-fi
-if ! kc_api GET "/clients/${INTERNAL_CLIENT_ID}/protocol-mappers/models" \
-    | jq -e '.[] | select(.name == "kcp-mcp-audience")' > /dev/null; then
-  # kcp validates that the token audience matches the configured client ID.
-  kc_api POST "/clients/${INTERNAL_CLIENT_ID}/protocol-mappers/models" \
-    "{\"name\":\"kcp-mcp-audience\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",\"config\":{\"included.client.audience\":\"${CLIENT_ID}\",\"access.token.claim\":\"true\"}}" > /dev/null
-fi
-
-step "Enabling OAuth client discovery (anonymous DCR + default audience)"
-# MCP clients register themselves via RFC 7591 dynamic client registration.
-# Keycloak's anonymous DCR policy requires either host or client-URI
-# verification; clients redirect to localhost, so trust that and drop the
-# request-origin check (the request reaches Keycloak through the gateway).
-TRUSTED_HOSTS=$(kc_api GET "/components?type=org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy" \
-  | jq '[.[] | select(.providerId == "trusted-hosts" and .subType == "anonymous")][0]')
-echo "${TRUSTED_HOSTS}" | jq '.config["trusted-hosts"] = ["localhost","127.0.0.1"]
-    | .config["host-sending-registration-request-must-match"] = ["false"]
-    | .config["client-uris-must-match"] = ["true"]' \
-  | kc_api PUT "/components/$(echo "${TRUSTED_HOSTS}" | jq -r .id)" "$(cat)" > /dev/null
-
-# Dynamically registered clients get their own client_id; a realm-default
-# scope with an audience mapper keeps their tokens acceptable to the server,
-# which validates audience against ${CLIENT_ID}.
-SCOPE_ID=$(kc_api GET /client-scopes | jq -r ".[] | select(.name == \"kcp-mcp-audience\") | .id")
-if [ -z "${SCOPE_ID}" ]; then
-  kc_api POST /client-scopes "{\"name\":\"kcp-mcp-audience\",\"protocol\":\"openid-connect\",\"attributes\":{\"include.in.token.scope\":\"false\",\"display.on.consent.screen\":\"false\"},\"protocolMappers\":[{\"name\":\"kcp-mcp-audience\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",\"config\":{\"included.client.audience\":\"${CLIENT_ID}\",\"access.token.claim\":\"true\",\"id.token.claim\":\"false\"}}]}" > /dev/null
-  SCOPE_ID=$(kc_api GET /client-scopes | jq -r ".[] | select(.name == \"kcp-mcp-audience\") | .id")
-fi
-kc_api PUT "/default-default-client-scopes/${SCOPE_ID}" > /dev/null
+step "Configuring Keycloak realm '${REALM}' declaratively (keycloak-config-cli Job)"
+# Job specs are immutable; drop any previous run before re-applying.
+${KC} delete job mcp-keycloak-config --ignore-not-found
+${KC} apply -f "${ROOT}/examples/platform-mesh/keycloak/mcp-realm-config.yaml"
+${KC} wait --for=condition=complete job/mcp-keycloak-config --timeout=180s
 
 step "Extracting the kcp serving CA for client-side TLS trust"
 mkdir -p "${ROOT}/.secret"
@@ -182,17 +138,24 @@ echo "${ROOT}/.secret/kcp-ca.crt"
 step "Verifying end to end"
 TOKEN=$(KEYCLOAK_URL="${KEYCLOAK_URL}" REALM="${REALM}" CLIENT_ID="${CLIENT_ID}" \
   DEMO_USER="${DEMO_USER}" DEMO_PASSWORD="${DEMO_PASSWORD}" "${ROOT}/hack/get-token.sh")
-curl -s --cacert "${ROOT}/.secret/kcp-ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+echo "-- MCP initialize as ${DEMO_USER}:"
+curl -s --cacert "$(mkcert -CAROOT)/rootCA.pem" \
+  -H "Authorization: Bearer ${TOKEN}" \
   -X POST -H 'Content-Type: application/json' \
-  -d '{"apiVersion":"access.contrib.kcp.io/v1alpha1","kind":"SelfClusterAccessReview"}' \
-  "${EXTERNAL_URL}/services/access/apis/access.contrib.kcp.io/v1alpha1/selfclusteraccessreviews" \
-  | jq '.status'
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"setup-check","version":"0"}}}' \
+  "${MCP_URL}" | sed -n 's/^data: //p' | jq '.result.serverInfo'
+echo "-- MCP tokens must not work on the kcp API (expect 401):"
+curl -s -o /dev/null -w '%{http_code}\n' --cacert "${ROOT}/.secret/kcp-ca.crt" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  https://kcp.api.portal.localhost:8443/clusters/root/apis | grep -x 401
 echo "-- OAuth discovery metadata:"
-curl -sk "https://mcp.portal.localhost:8443/.well-known/oauth-protected-resource/services/mcp" | jq .
+curl -s --cacert "$(mkcert -CAROOT)/rootCA.pem" \
+  "https://mcp.portal.localhost:8443/.well-known/oauth-protected-resource/services/mcp" | jq .
 
 cat <<EOF
 
-Done. MCP endpoint: https://mcp.portal.localhost:8443/services/mcp
+Done. MCP endpoint: ${MCP_URL}
 
 Point any MCP client at it with no credentials; it discovers Keycloak via
 OAuth protected-resource metadata, registers itself, and opens a browser
@@ -200,6 +163,6 @@ login (${DEMO_USER} / ${DEMO_PASSWORD}). TLS is the mkcert root, already
 trusted on this machine. For Copilot Chat, copy examples/copilot/mcp.json
 to .vscode/mcp.json.
 
-For scripting or debugging without a browser, hack/get-token.sh prints a
-bearer token to pass as an Authorization header directly.
+Tokens are only valid on the MCP endpoint: the kcp front-proxy rejects
+them, so an MCP credential can never be replayed against the kcp API.
 EOF

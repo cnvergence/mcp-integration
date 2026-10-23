@@ -1,0 +1,22 @@
+# Declarative target for the FrontProxy configuration that
+# hack/setup-platform-mesh.sh currently applies as a kubectl patch.
+#
+# The platform-mesh local-setup manages the FrontProxy through the infra
+# HelmRelease (FluxCD), so direct patches on the FrontProxy object are
+# drift and get lost on the next Helm upgrade. The durable place for this
+# configuration is the values of that release:
+#
+#   kubectl -n platform-mesh-system patch helmrelease infra --type=merge \
+#     --patch "$(printf 'spec:\n  values:\n%s' "$(sed 's/^/    /' examples/platform-mesh/infra-values-mcp.yaml)")"
+#
+# The front-proxy carries no OIDC configuration: MCP bearer tokens are
+# validated by mcp-vw (and the Agent Router in Setup 2) only, so they never
+# work against the kcp API itself.
+kcp:
+  frontProxy:
+    additionalPathMappings:
+      - path: /services/access
+        backend: https://access-vw-virtual-workspace.platform-mesh-system.svc.cluster.local:6443
+        backend_server_ca: /etc/kcp/tls/ca/tls.crt
+        proxy_client_cert: /etc/kcp-front-proxy/requestheader-client/tls.crt
+        proxy_client_key: /etc/kcp-front-proxy/requestheader-client/tls.key

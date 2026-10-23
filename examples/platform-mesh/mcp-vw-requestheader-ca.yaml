@@ -1,0 +1,39 @@
+# Dedicated requestheader CA for mcp-vw. The operator-mounted kcp
+# requestheader CA is trusted by every kcp shard, so a certificate from it
+# can impersonate any user against kcp itself. mcp-vw is configured (via
+# the chart's requestheader.caSecretName value) to trust this CA instead:
+# certificates issued here authenticate X-Remote-* headers to mcp-vw and
+# nothing else.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mcp-vw-requestheader-selfsigned
+  namespace: platform-mesh-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mcp-vw-requestheader-ca
+  namespace: platform-mesh-system
+spec:
+  secretName: mcp-vw-requestheader-ca
+  commonName: mcp-vw-requestheader-ca
+  isCA: true
+  duration: 87600h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: mcp-vw-requestheader-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mcp-vw-requestheader-ca
+  namespace: platform-mesh-system
+spec:
+  ca:
+    secretName: mcp-vw-requestheader-ca

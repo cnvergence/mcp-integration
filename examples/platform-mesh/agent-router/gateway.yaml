@@ -41,6 +41,15 @@ spec:
       envoyService:
         name: agent-router
         type: ClusterIP
+  # The client certificate from requestheader-cert.yaml, presented on every
+  # backend TLS connection. mcp-vw authenticates the router through it and
+  # takes the caller identity from the X-Remote-User header set by the
+  # MCPRoute, so no user token crosses this hop.
+  backendTLS:
+    clientCertificateRef:
+      kind: Secret
+      name: agent-router-requestheader-client
+      namespace: platform-mesh-system
   telemetry:
     accessLog:
       settings:

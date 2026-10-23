@@ -10,9 +10,10 @@ REALM=${REALM:-welcome}
 CLIENT_ID=${CLIENT_ID:-kcp-mcp}
 DEMO_USER=${DEMO_USER:-alice@example.com}
 DEMO_PASSWORD=${DEMO_PASSWORD:-alice-password}
+SCOPE=${SCOPE:-kcp-mcp}
 
 RESPONSE=$(curl -sk -d "client_id=${CLIENT_ID}" -d "username=${DEMO_USER}" \
-  -d "password=${DEMO_PASSWORD}" -d "grant_type=password" \
+  -d "password=${DEMO_PASSWORD}" -d "grant_type=password" -d "scope=${SCOPE}" \
   "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token")
 
 TOKEN=$(echo "${RESPONSE}" | jq -r '.access_token // empty')

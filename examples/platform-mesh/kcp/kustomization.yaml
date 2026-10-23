@@ -1,0 +1,11 @@
+# Everything a demo workspace needs to serve MCP:
+#
+#   kubectl --server $KCP/clusters/<workspace> apply -k examples/platform-mesh/kcp
+#
+# hack/setup-platform-mesh.sh applies this in every demo workspace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - apibinding-consumer.yaml
+  - mcp-impersonator-rbac.yaml
+  - mcp-demo-user-rbac.yaml

@@ -1,0 +1,23 @@
+# Client certificate the Agent Router presents to mcp-vw for requestheader
+# authentication, issued from the dedicated mcp-vw requestheader CA
+# (../mcp-vw-requestheader-ca.yaml). kcp shards do not trust that CA, so
+# this certificate authenticates X-Remote-* headers to mcp-vw and grants
+# nothing on the kcp API. The agent-router name is accepted via the
+# chart's requestheader.allowedNames value.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agent-router-requestheader-client
+  namespace: platform-mesh-system
+spec:
+  secretName: agent-router-requestheader-client
+  commonName: agent-router
+  usages:
+    - client auth
+  duration: 8760h
+  privateKey:
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: mcp-vw-requestheader-ca
+    kind: Issuer

@@ -2,14 +2,16 @@
 # Sets up the full MCP stack behind the Agent Router (formerly Envoy AI
 # Gateway) on a running platform-mesh local-setup cluster:
 #
-#   - runs hack/setup-platform-mesh.sh for the base front-proxy setup
+#   - runs hack/setup-platform-mesh.sh for the base MCP stack
 #   - installs Envoy Gateway and the Agent Router via Helm
-#   - extracts the kcp root CA for backend TLS validation
 #   - applies the Gateway, MCPRoute and Traefik HTTPRoute from
 #     examples/platform-mesh/agent-router
 #
-# The MCPRoute authenticates callers against the same Keycloak realm and
-# forwards their bearer token to the front-proxy.
+# The MCPRoute validates callers' bearer tokens (issuer and audience)
+# against the same Keycloak realm and terminates OAuth at the router: it
+# asserts the caller's kcp identity to mcp-vw via X-Remote-User over mutual
+# TLS (requestheader authentication), so the user token never leaves the
+# router. The kcp front-proxy is not on this path.
 #
 # Usage:
 #   KCP_ADMIN_KUBECONFIG=/path/to/admin.kubeconfig hack/setup-agent-router.sh
@@ -21,7 +23,7 @@ set -euo pipefail
 CONTEXT=${KUBE_CONTEXT:-kind-platform-mesh}
 NS=${NAMESPACE:-platform-mesh-system}
 ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.9.1}
-AGENT_ROUTER_VERSION=${AGENT_ROUTER_VERSION:-v1.1.0}
+AGENT_ROUTER_VERSION=${AGENT_ROUTER_VERSION:-v1.2.0}
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KC="kubectl --context ${CONTEXT} -n ${NS}"
@@ -51,15 +53,12 @@ helm upgrade --install agent-router oci://docker.io/envoyproxy/ai-gateway-helm \
   --namespace envoy-ai-gateway-system --create-namespace \
   --wait --timeout 180s
 
-step "Extracting the kcp root CA for backend TLS validation"
-${KC} get secret root-ca -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/kcp-root-ca.crt
-${KC} create configmap kcp-root-ca \
-  --from-file=ca.crt=/tmp/kcp-root-ca.crt \
-  --dry-run=client -o yaml | ${KC} apply -f -
-rm -f /tmp/kcp-root-ca.crt
-
 step "Applying the Gateway, MCPRoute and HTTPRoute"
 kubectl --context "${CONTEXT}" apply -k "${ROOT}/examples/platform-mesh/agent-router"
+
+step "Waiting for the requestheader client certificate"
+kubectl --context "${CONTEXT}" -n "${NS}" wait certificate \
+  agent-router-requestheader-client --for=condition=Ready --timeout=120s
 
 step "Waiting for the router"
 kubectl --context "${CONTEXT}" -n "${NS}" wait gateway agent-router \

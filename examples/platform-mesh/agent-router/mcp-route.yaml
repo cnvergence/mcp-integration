@@ -1,7 +1,19 @@
-# Routes MCP traffic through the kcp front-proxy, the same path direct MCP
-# clients use. The router validates the caller's bearer token against
-# Keycloak and forwards it. The front-proxy validates it again and maps it
-# to a kcp identity.
+# Routes MCP traffic from the Agent Router straight to the MCP virtual
+# workspace. The router terminates the caller's OAuth entirely: it validates
+# the bearer token (issuer, signature, audience) and asserts the caller's
+# kcp identity to mcp-vw via the X-Remote-User header over mutual TLS —
+# the same requestheader mechanism the kcp front-proxy uses towards shards.
+# The user token never leaves the router, so nothing downstream can replay
+# it and there is no token passthrough at all. mcp-vw only accepts the
+# header when the router presents the client certificate from
+# requestheader-cert.yaml, wired in via the EnvoyProxy backendTLS in
+# gateway.yaml; clients cannot forge X-Remote-User because the OAuth filter
+# overwrites it from the validated token's claim.
+#
+# TLS origination for the Envoy to mcp-vw hop is covered by the
+# mcp-vw-backend-tls BackendTLSPolicy from ../mcp-route.yaml, applied by
+# hack/setup-platform-mesh.sh; BackendTLSPolicy attaches to the Service and
+# is honored by every gateway implementation routing to it.
 apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: MCPRoute
 metadata:
@@ -15,44 +27,36 @@ spec:
   securityPolicy:
     oauth:
       issuer: https://portal.localhost:8443/keycloak/realms/welcome
+      # MCP authorization spec: the resource server MUST validate that the
+      # token was issued for it (RFC 8707). Without this, any valid
+      # Keycloak token for any client would pass.
+      audiences:
+        - kcp-mcp
       jwks:
         remoteJWKS:
           # JWKS is fetched over in-cluster HTTP because Envoy does not
           # trust the mkcert CA behind the external Keycloak endpoint.
           # JWKS is public key material, so HTTP is fine here.
           uri: http://keycloak-service.platform-mesh-system.svc.cluster.local:8080/keycloak/realms/welcome/protocol/openid-connect/certs
+      # The kcp_user claim carries the caller's kcp identity
+      # (oidc:<email>, set by the realm's kcp-user-claim mapper). Mapping
+      # it to X-Remote-User turns the validated token into a requestheader
+      # identity assertion towards mcp-vw; any client-supplied value of the
+      # header is overwritten.
+      claimToHeaders:
+        - claim: kcp_user
+          header: X-Remote-User
       protectedResourceMetadata:
         # The URL MCP clients use to reach the router, published through the
         # local-setup Traefik gateway (see httproute.yaml).
         resource: https://agent-router.portal.localhost:8443/mcp
         scopesSupported:
-          - openid
-          - profile
-          - email
+          # The resource scope for this server, not login scopes: requesting
+          # it makes Keycloak attach the aud=kcp-mcp audience (optional
+          # kcp-mcp client scope in the welcome realm).
+          - kcp-mcp
   backendRefs:
-    - name: frontproxy-front-proxy
+    - name: mcp-vw-virtual-workspace
       kind: Service
-      port: 8443
+      port: 6443
       path: /services/mcp
-      forwardHeaders:
-        - name: Authorization
----
-# TLS origination for the Envoy to front-proxy hop, validated against the
-# kcp root CA. The kcp-root-ca ConfigMap is created by the setup script
-# from the kcp-operator root-ca secret.
-apiVersion: gateway.networking.k8s.io/v1alpha3
-kind: BackendTLSPolicy
-metadata:
-  name: kcp-front-proxy-tls
-  namespace: platform-mesh-system
-spec:
-  targetRefs:
-    - group: ""
-      kind: Service
-      name: frontproxy-front-proxy
-  validation:
-    caCertificateRefs:
-      - group: ""
-        kind: ConfigMap
-        name: kcp-root-ca
-    hostname: frontproxy-front-proxy.platform-mesh-system.svc.cluster.local

@@ -39,6 +39,20 @@ oauth:
   authorizationServers:
     - https://portal.localhost:8443/keycloak/realms/welcome
   resource: https://mcp.portal.localhost:8443/services/mcp
+  # Resource scope clients should request: the optional kcp-mcp client
+  # scope attaches the aud=kcp-mcp audience in Keycloak.
+  scopes:
+    - kcp-mcp
+
+# Trust for X-Remote-* identity assertions (Setup 2, Agent Router): a
+# dedicated CA replaces the operator-mounted kcp requestheader CA, so the
+# router's client certificate is useless against kcp itself. The CA is
+# created by examples/platform-mesh/mcp-vw-requestheader-ca.yaml, applied
+# by hack/setup-platform-mesh.sh before the chart installs.
+requestheader:
+  caSecretName: mcp-vw-requestheader-ca
+  allowedNames:
+    - agent-router
 
 # See access-vw.values.yaml for how to find the traefik ClusterIP.
 hostAliases:

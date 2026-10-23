@@ -1,0 +1,206 @@
+# Declarative Keycloak configuration for the MCP demo, applied by a
+# keycloak-config-cli Job instead of ad-hoc admin REST calls:
+#
+#   kubectl -n platform-mesh-system delete job mcp-keycloak-config --ignore-not-found
+#   kubectl -n platform-mesh-system apply -f examples/platform-mesh/keycloak/mcp-realm-config.yaml
+#   kubectl -n platform-mesh-system wait --for=condition=complete job/mcp-keycloak-config --timeout=180s
+#
+# It updates the existing local-setup "welcome" realm in place:
+#
+#   - the alice@example.com demo user with a fixed password and a kcp-user
+#     attribute carrying the kcp identity (oidc:<email>, matching the
+#     --oidc-username-prefix mcp-vw applies on its direct OIDC path)
+#   - the kcp-mcp public client: a demo-only token client for get-token.sh
+#     and the setup's final check. It only allows the password grant (which
+#     OAuth 2.1 removed; real MCP clients register dynamically and use the
+#     code flow + PKCE). Like every other client it gets aud=kcp-mcp and
+#     the kcp_user claim only by requesting the kcp-mcp scope
+#   - anonymous dynamic client registration (RFC 7591): MCP clients redirect
+#     to localhost, so trust that and drop the request-origin check
+#   - a kcp-mcp client scope with the audience mapper (kcp validates that
+#     the token audience matches the client ID) and a kcp_user claim mapper
+#     (the Agent Router maps it to X-Remote-User for requestheader
+#     authentication against mcp-vw), realm-default *optional* so only
+#     clients that request it (it is advertised as scopes_supported on both
+#     setups) get aud=kcp-mcp, instead of every client created in the realm
+#   - the realm user profile with unmanagedAttributePolicy ENABLED; without
+#     it Keycloak 26 silently drops the kcp-user attribute on import. The
+#     rest of the profile config repeats the Keycloak defaults because the
+#     component import replaces the whole document.
+#
+# defaultDefaultClientScopes and defaultOptionalClientScopes replace the
+# realm's lists, so they repeat the local-setup defaults. Refresh token
+# rotation (revokeRefreshToken) is a known gap: it is realm-wide and the
+# portal's parallel refreshes (multiple tabs) have not been verified
+# against it. The no-delete import settings on the Job keep everything
+# else in the realm untouched.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-keycloak-realm
+data:
+  welcome.json: |
+    {
+      "realm": "welcome",
+      "users": [
+        {
+          "username": "alice@example.com",
+          "email": "alice@example.com",
+          "firstName": "Demo",
+          "lastName": "User",
+          "enabled": true,
+          "emailVerified": true,
+          "requiredActions": [],
+          "attributes": {
+            "kcp-user": ["oidc:alice@example.com"]
+          },
+          "credentials": [
+            { "type": "password", "value": "alice-password", "temporary": false }
+          ]
+        }
+      ],
+      "clients": [
+        {
+          "clientId": "kcp-mcp",
+          "protocol": "openid-connect",
+          "publicClient": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": false,
+          "redirectUris": [],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "microprofile-jwt",
+            "organization",
+            "kcp-mcp"
+          ],
+          "protocolMappers": []
+        }
+      ],
+      "clientScopes": [
+        {
+          "name": "kcp-mcp",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "false"
+          },
+          "protocolMappers": [
+            {
+              "name": "kcp-mcp-audience",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "config": {
+                "included.client.audience": "kcp-mcp",
+                "access.token.claim": "true",
+                "id.token.claim": "false"
+              }
+            },
+            {
+              "name": "kcp-user-claim",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "kcp-user",
+                "claim.name": "kcp_user",
+                "jsonType.label": "String",
+                "access.token.claim": "true",
+                "id.token.claim": "false",
+                "userinfo.token.claim": "false"
+              }
+            }
+          ]
+        }
+      ],
+      "defaultDefaultClientScopes": [
+        "role_list",
+        "saml_organization",
+        "profile",
+        "email",
+        "roles",
+        "web-origins",
+        "acr",
+        "basic"
+      ],
+      "defaultOptionalClientScopes": [
+        "offline_access",
+        "address",
+        "phone",
+        "microprofile-jwt",
+        "organization",
+        "kcp-mcp"
+      ],
+      "components": {
+        "org.keycloak.userprofile.UserProfileProvider": [
+          {
+            "providerId": "declarative-user-profile",
+            "config": {
+              "kc.user.profile.config": [
+                "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}],\"unmanagedAttributePolicy\":\"ENABLED\"}"
+              ]
+            }
+          }
+        ],
+        "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy": [
+          {
+            "name": "Trusted Hosts",
+            "providerId": "trusted-hosts",
+            "subType": "anonymous",
+            "config": {
+              "trusted-hosts": ["localhost", "127.0.0.1"],
+              "host-sending-registration-request-must-match": ["false"],
+              "client-uris-must-match": ["true"]
+            }
+          }
+        ]
+      }
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mcp-keycloak-config
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: keycloak-config-cli
+          image: docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5
+          env:
+            - name: KEYCLOAK_URL
+              value: http://keycloak-service:8080/keycloak
+            - name: KEYCLOAK_USER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: username
+            - name: KEYCLOAK_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: secret
+            - name: KEYCLOAK_AVAILABILITYCHECK_ENABLED
+              value: "true"
+            - name: KEYCLOAK_AVAILABILITYCHECK_TIMEOUT
+              value: "120s"
+            - name: IMPORT_FILES_LOCATIONS
+              value: /config/*.json
+            - name: IMPORT_MANAGED_CLIENT_SCOPE
+              value: no-delete
+            - name: IMPORT_MANAGED_COMPONENT
+              value: no-delete
+            - name: IMPORT_MANAGED_SUB_COMPONENT
+              value: no-delete
+            - name: IMPORT_MANAGED_REQUIRED_ACTION
+              value: no-delete
+          volumeMounts:
+            - name: realm-config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: realm-config
+          configMap:
+            name: mcp-keycloak-realm
